@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AquaInfinity · Admin Console</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2306b6d4'%3E%3Cpath d='M12 2s7 8 7 13a7 7 0 1 1-14 0c0-5 7-13 7-13z'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <!-- ===== Login ===== -->
+    <div id="login" class="login hidden">
+      <form id="loginForm" class="login-card" autocomplete="on">
+        <div class="brand">
+          <span class="brand-drop">💧</span>
+          <div>
+            <h1>AquaInfinity</h1>
+            <p>Admin Console</p>
+          </div>
+        </div>
+        <label>Email<input id="email" type="email" required placeholder="you@example.com" /></label>
+        <label>Password<input id="password" type="password" required placeholder="••••••••" /></label>
+        <button class="btn primary" type="submit" id="loginBtn">Sign in</button>
+        <p id="loginError" class="error hidden"></p>
+        <p class="hint">Only accounts with the <b>admin</b> role can sign in here.</p>
+      </form>
+    </div>
+
+    <!-- ===== App ===== -->
+    <div id="app" class="app hidden">
+      <aside class="sidebar">
+        <div class="brand sidebar-brand">
+          <span class="brand-drop">💧</span>
+          <div><h1>AquaInfinity</h1><p>Admin</p></div>
+        </div>
+        <nav id="nav">
+          <button data-section="overview" class="nav-item active">📊 Overview</button>
+          <button data-section="orders" class="nav-item">🧾 Orders</button>
+          <button data-section="users" class="nav-item">👤 Users &amp; Admins</button>
+          <button data-section="products" class="nav-item">🛒 Products</button>
+          <button data-section="catalog" class="nav-item">💠 Filter Catalog</button>
+          <button data-section="cartridges" class="nav-item">🧪 Cartridges</button>
+          <button data-section="payments" class="nav-item">💳 Payment Methods</button>
+          <button data-section="broadcasts" class="nav-item">📣 Broadcasts</button>
+          <button data-section="support" class="nav-item">🛟 Support Notes</button>
+          <button data-section="audit" class="nav-item">🛡️ Audit Log</button>
+        </nav>
+        <div class="sidebar-foot">
+          <span id="whoami" class="whoami"></span>
+          <button id="logout" class="btn ghost small">Sign out</button>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <h2 id="sectionTitle">Overview</h2>
+          <button id="refresh" class="btn ghost small">↻ Refresh</button>
+        </header>
+        <section id="view" class="view"><div class="loading">Loading…</div></section>
+      </main>
+    </div>
+
+    <!-- ===== Modal + Toast ===== -->
+    <div id="modalRoot"></div>
+    <div id="toastRoot" class="toast-root"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
