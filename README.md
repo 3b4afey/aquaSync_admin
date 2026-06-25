@@ -73,6 +73,16 @@ first image is mirrored into `products.image_path` for the Flutter app. This nee
 the same **`admin-roles-and-uploads.sql`** (it creates the bucket + admin write
 policy and adds the `image_paths` columns).
 
+## Filter product bundles (cartridges inside a filter)
+
+When a product's **Category = filter**, the editor shows a **“Cartridges in this
+filter”** section: pick the **cartridge-type products** the filter is built from,
+each with a stage #, quantity, and optional note. The products list shows a
+`🧩 N` badge with the part count on filter products. This needs
+**`admin-product-bundles.sql`** run once (creates the `product_components` link
+table + admin policies). Tip: create your cartridge products first, then build
+the filter and add them.
+
 ## Configuration
 
 `config.js` holds the project URL + **anon** key (the same public pair the Flutter

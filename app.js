@@ -89,6 +89,10 @@
     if (/last_admin/i.test(m)) return "Can't revoke the last remaining admin.";
     if (/cannot_modify_head_admin/i.test(m))
       return "Head admins can't be changed from the console (promote/demote via SQL).";
+    if (/product_components|relation .* does not exist/i.test(m))
+      return 'Run admin-product-bundles.sql once to enable filter cartridge bundles.';
+    if (/foreign key|still referenced|violates foreign/i.test(m))
+      return "Can't delete — it's still referenced (e.g. by existing orders or registered filters). Mark it unavailable / inactive instead.";
     return m;
   }
 
@@ -244,6 +248,26 @@
     return { kept: () => kept, files: () => pending.map((p) => p.file) };
   }
 
+  // Insert/update a row, returning {data,error}. If the optional `image_paths`
+  // column isn't present yet (admin-roles-and-uploads.sql not applied), retry
+  // without it so saving still works (just without the extra images).
+  async function persistRow({ table, payload, id }) {
+    const run = (pl) =>
+      id
+        ? sb.from(table).update(pl).eq('id', id).select().single()
+        : sb.from(table).insert(pl).select().single();
+    let res = await run(payload);
+    if (
+      res.error &&
+      'image_paths' in payload &&
+      /image_paths/i.test(`${res.error.message || ''} ${res.error.details || ''}`)
+    ) {
+      const { image_paths, ...rest } = payload;
+      res = await run(rest);
+    }
+    return res;
+  }
+
   // ---------- auth ----------
   async function isAdmin() {
     const { data, error } = await sb.rpc('is_admin');
@@ -342,9 +366,15 @@
     });
   }
   document.querySelectorAll('.nav-item').forEach((b) =>
-    b.addEventListener('click', () => navigate(b.dataset.section)),
+    b.addEventListener('click', () => {
+      navigate(b.dataset.section);
+      $('.sidebar').classList.remove('nav-open'); // close the mobile menu
+    }),
   );
   $('#refresh').addEventListener('click', () => navigate(current));
+  $('#navToggle').addEventListener('click', () =>
+    $('.sidebar').classList.toggle('nav-open'),
+  );
 
   // Click-to-copy for any element carrying data-copy (e.g. user-id chips).
   document.addEventListener('click', (e) => {
@@ -372,10 +402,10 @@
     const recent = (m.recent || [])
       .map(
         (r) => `<tr>
-          <td>${idChip(r.id, 'order ID')}</td>
-          <td>${statusBadge(r.status)}</td>
-          <td>${egp(r.total_minor)}</td>
-          <td class="subtle">${fmtDate(r.created_at)}</td></tr>`,
+          <td data-label="Order">${idChip(r.id, 'order ID')}</td>
+          <td data-label="Status">${statusBadge(r.status)}</td>
+          <td data-label="Total">${egp(r.total_minor)}</td>
+          <td data-label="Created" class="subtle">${fmtDate(r.created_at)}</td></tr>`,
       )
       .join('');
 
@@ -395,7 +425,7 @@
         <div class="section-head"><h3>Orders by status</h3></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">${statusChips || '<span class="subtle">No orders yet.</span>'}</div>
       </div>
-      <div class="table-wrap" style="margin-top:18px">
+      <div class="table-wrap cards" style="margin-top:18px">
         <div style="padding:14px 16px;font-weight:700;font-size:14px;border-bottom:1px solid var(--line)">Recent orders</div>
         <table><thead><tr><th>Order</th><th>Status</th><th>Total</th><th>Created</th></tr></thead>
         <tbody>${recent || '<tr><td colspan="4" class="empty">No orders.</td></tr>'}</tbody></table>
@@ -456,18 +486,18 @@
         <h3>${orders.length} order(s)</h3>
         <div class="toolbar"><select id="ordFilter">${opts}</select></div>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap cards"><table>
         <thead><tr><th>Order</th><th>Status</th><th>Items</th><th>Total</th><th>Method</th><th>Created</th><th></th></tr></thead>
         <tbody>${
           orders
             .map(
               (o) => `<tr>
-          <td>${idChip(o.id, 'order ID')}</td>
-          <td>${statusBadge(o.status)}</td>
-          <td>${counts[o.id] || 0}</td>
-          <td><b>${egp(o.total_minor)}</b></td>
-          <td class="subtle">${esc(label(o.payment_method))}</td>
-          <td class="subtle">${fmtDate(o.created_at)}</td>
+          <td data-label="Order">${idChip(o.id, 'order ID')}</td>
+          <td data-label="Status">${statusBadge(o.status)}</td>
+          <td data-label="Items">${counts[o.id] || 0}</td>
+          <td data-label="Total"><b>${egp(o.total_minor)}</b></td>
+          <td data-label="Method" class="subtle">${esc(label(o.payment_method))}</td>
+          <td data-label="Created" class="subtle">${fmtDate(o.created_at)}</td>
           <td class="actions"><button class="btn ghost small" data-open="${o.id}">View</button></td>
         </tr>`,
             )
@@ -490,9 +520,51 @@
     const lines = (items || [])
       .map(
         (i) =>
-          `<tr><td>${esc(i.name_snapshot)}</td><td>×${i.quantity}</td><td>${egp(i.unit_price_minor * i.quantity)}</td></tr>`,
+          `<tr><td data-label="Item">${esc(i.name_snapshot)}</td><td data-label="Qty">×${i.quantity}</td><td data-label="Line">${egp(i.unit_price_minor * i.quantity)}</td></tr>`,
       )
       .join('');
+
+    // Receipt: mint a short-lived signed URL. Admins may read the private
+    // `receipts` bucket via the "admin read receipts" storage policy.
+    let receiptUrl = null;
+    if (o.receipt_path) {
+      const { data: signed } = await sb.storage
+        .from('receipts')
+        .createSignedUrl(o.receipt_path, 3600);
+      receiptUrl = (signed && signed.signedUrl) || null;
+    }
+    const receiptHTML =
+      o.payment_method === 'cash_on_delivery'
+        ? '<p class="subtle">Cash on delivery — no receipt to upload.</p>'
+        : !o.receipt_path
+          ? '<p class="subtle">No receipt uploaded yet.</p>'
+          : receiptUrl
+            ? `<a href="${esc(receiptUrl)}" target="_blank" rel="noopener">
+                 <img src="${esc(receiptUrl)}" alt="payment receipt"
+                      style="max-width:100%;border-radius:8px;border:1px solid var(--line);display:block"/></a>
+               <div style="margin-top:8px"><a class="btn ghost small" href="${esc(receiptUrl)}"
+                  target="_blank" rel="noopener" download>⬇ Open / download receipt</a></div>`
+            : `<p class="error">Couldn't load the receipt — run the "admin read receipts"
+                 storage policy once (see the note in app.js / SETUP.md).</p>`;
+
+    // Customer identity (for the invoice) — best effort via the admin_users view.
+    let customer = null;
+    if (o.user_id) {
+      const { data: cu } = await sb
+        .from('admin_users')
+        .select('identity')
+        .eq('id', o.user_id)
+        .maybeSingle();
+      customer = (cu && cu.identity) || null;
+    }
+
+    // Google Maps: exact pin when the customer shared GPS, else a cleaned
+    // address search (drop the trailing "· ☎ phone" so geocoding is better).
+    const hasPin = o.delivery_lat != null && o.delivery_lng != null;
+    const mapsUrl = hasPin
+      ? `https://www.google.com/maps/search/?api=1&query=${o.delivery_lat},${o.delivery_lng}`
+      : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapsQuery(o.delivery_snapshot))}`;
+
     modal({
       title: `Order ${short(o.id)}`,
       bodyHTML: `
@@ -501,21 +573,118 @@
           <dt>Status</dt><dd>${statusBadge(o.status)}</dd>
           <dt>Total</dt><dd><b>${egp(o.total_minor)}</b> (subtotal ${egp(o.subtotal_minor)} + delivery ${egp(o.delivery_fee_minor)})</dd>
           <dt>Payment</dt><dd>${esc(label(o.payment_method))}</dd>
-          <dt>Delivery</dt><dd>${esc(o.delivery_snapshot || '—')}</dd>
+          <dt>Delivery</dt><dd>${esc(o.delivery_snapshot || '—')}
+            <div style="margin-top:6px">
+              <a class="btn ghost small" href="${mapsUrl}" target="_blank" rel="noopener">📍 ${hasPin ? 'Open location pin' : 'Find address'} in Google Maps</a>
+              ${hasPin ? '' : '<span class="subtle" style="margin-left:6px">no GPS — address search</span>'}
+            </div></dd>
           <dt>Created</dt><dd>${fmtDate(o.created_at)}</dd>
           ${o.rejection_reason ? `<dt>Rejection</dt><dd>${esc(o.rejection_reason)}</dd>` : ''}
         </dl>
-        <div class="table-wrap" style="margin-top:6px"><table>
+        <div style="margin-top:8px"><b>Payment receipt</b>
+          <div style="margin-top:6px">${receiptHTML}</div></div>
+        <div class="table-wrap cards" style="margin-top:12px"><table>
           <thead><tr><th>Item</th><th>Qty</th><th>Line</th></tr></thead>
           <tbody>${lines || '<tr><td colspan="3" class="empty">No items.</td></tr>'}</tbody></table></div>`,
-      footHTML: orderActions(o),
+      footHTML: `<button class="btn ghost" data-invoice>🧾 Download invoice (PDF)</button>${orderActions(o)}`,
     });
+    const invBtn = document.querySelector('[data-invoice]');
+    if (invBtn)
+      invBtn.addEventListener('click', () => downloadInvoicePdf(o, items || [], customer));
     wireOrderActions(o);
+  }
+
+  // Cleans a delivery snapshot for a Google Maps query (drops the "· ☎ phone"
+  // tail so the geocoder gets just the address).
+  function mapsQuery(snapshot) {
+    return String(snapshot || '').split('·')[0].trim();
+  }
+
+  // Builds and downloads a full PDF invoice for the order (jsPDF + autotable).
+  // Includes the customer, full delivery details, line items and totals.
+  function downloadInvoicePdf(o, items, customer) {
+    const JsPDF = window.jspdf && window.jspdf.jsPDF;
+    if (!JsPDF) return err('PDF library not loaded — hard-refresh the page and retry.');
+    const doc = new JsPDF({ unit: 'pt', format: 'a4' });
+    const M = 40;
+    const RX = doc.internal.pageSize.getWidth() - M;
+
+    // Header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(22);
+    doc.setTextColor(14, 165, 233);
+    doc.text('AquaInfinity', M, 52);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text('Water filtration & accessories', M, 66);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.text('INVOICE', RX, 52, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.text('#' + short(o.id), RX, 66, { align: 'right' });
+    doc.setDrawColor(226, 232, 240);
+    doc.line(M, 84, RX, 84);
+
+    // Meta (label : value), wrapping the address
+    let y = 104;
+    const meta = [
+      ['Order', '#' + short(o.id)],
+      ['Date', fmtDate(o.created_at)],
+      ['Status', label(o.status)],
+      ['Payment', label(o.payment_method)],
+      ['Customer', customer || o.user_id || '—'],
+      ['Deliver to', o.delivery_snapshot || '—'],
+    ];
+    doc.setFontSize(10);
+    meta.forEach(([k, v]) => {
+      doc.setTextColor(100, 116, 139);
+      doc.text(k, M, y);
+      doc.setTextColor(15, 23, 42);
+      const lines = doc.splitTextToSize(String(v), RX - M - 90);
+      doc.text(lines, M + 90, y);
+      y += 14 * lines.length + 2;
+    });
+
+    // Items table
+    doc.autoTable({
+      startY: y + 8,
+      margin: { left: M, right: M },
+      head: [['Item', 'Qty', 'Unit', 'Total']],
+      body: (items || []).map((i) => [
+        i.name_snapshot,
+        String(i.quantity),
+        egp(i.unit_price_minor),
+        egp(i.unit_price_minor * i.quantity),
+      ]),
+      styles: { fontSize: 10, cellPadding: 6 },
+      headStyles: { fillColor: [14, 165, 233], textColor: 255 },
+      columnStyles: { 1: { halign: 'center' }, 2: { halign: 'right' }, 3: { halign: 'right' } },
+    });
+
+    // Totals
+    let ty = (doc.lastAutoTable ? doc.lastAutoTable.finalY : y) + 22;
+    doc.setFontSize(10);
+    doc.setTextColor(15, 23, 42);
+    doc.text('Subtotal: ' + egp(o.subtotal_minor), RX, ty, { align: 'right' });
+    ty += 16;
+    doc.text('Delivery: ' + egp(o.delivery_fee_minor), RX, ty, { align: 'right' });
+    ty += 18;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.text('Total: ' + egp(o.total_minor), RX, ty, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text('Thank you for choosing AquaInfinity.', M, ty + 30);
+
+    doc.save(`invoice-${short(o.id)}.pdf`);
   }
 
   function orderActions(o) {
     const close = '<button class="btn ghost" data-close>Close</button>';
-    if (o.status === 'awaiting_approval')
+    if (o.status === 'awaiting_approval' || o.status === 'pending_payment')
       return `${close}<button class="btn danger" data-act="reject">Reject</button><button class="btn success" data-act="confirm">Confirm</button>`;
     if (o.status === 'confirmed')
       return `${close}<button class="btn primary" data-act="out_for_delivery">Out for delivery</button>`;
@@ -535,9 +704,18 @@
           if (reason === null) return;
           patch = { status: 'rejected', rejection_reason: reason || null };
         } else patch = { status: act };
-        const { error } = await sb.from('orders').update(patch).eq('id', o.id);
+        const { data, error } = await sb
+          .from('orders')
+          .update(patch)
+          .eq('id', o.id)
+          .select();
         if (error) return err(explain(error));
-        ok(`Order ${short(o.id)} → ${label(patch.status)}`);
+        if (!data || data.length === 0) {
+          return err(
+            "Status didn't change — the update was blocked. Re-run the order-status policy + enum fix (admin-order-fix.sql).",
+          );
+        }
+        ok(`Order ${short(o.id)} → ${label(data[0].status)}`);
         closeModal();
         navigate('orders');
       }),
@@ -581,7 +759,7 @@
         <h3>${filtered.length} user(s)</h3>
         <div class="toolbar"><input class="search" id="userSearch" placeholder="Search email / id…" value="${esc(userSearch)}"/></div>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap cards"><table>
         <thead><tr><th>Identity</th><th>Role</th><th>User ID</th><th>Joined</th><th></th></tr></thead>
         <tbody>${
           filtered
@@ -595,12 +773,15 @@
                     ? `<button class="btn ghost small" data-revoke="${u.id}" data-id="${esc(u.identity)}">Revoke admin</button>`
                     : `<button class="btn primary small" data-grant="${u.id}" data-id="${esc(u.identity)}">Make admin</button>`;
               }
+              const notesBtn = `<button class="btn ghost small" data-notes="${u.id}" data-email="${esc(
+                u.identity,
+              )}">🛟 Notes</button>`;
               return `<tr>
-            <td>${esc(u.identity)}</td>
-            <td>${roleBadge(u.role)}</td>
-            <td>${idChip(u.id)}</td>
-            <td class="subtle">${fmtDate(u.created_at)}</td>
-            <td class="actions">${action}</td></tr>`;
+            <td data-label="Identity">${esc(u.identity)}</td>
+            <td data-label="Role">${roleBadge(u.role)}</td>
+            <td data-label="User ID">${idChip(u.id)}</td>
+            <td data-label="Joined" class="subtle">${fmtDate(u.created_at)}</td>
+            <td class="actions">${notesBtn} ${action}</td></tr>`;
             })
             .join('') || '<tr><td colspan="5" class="empty">No users.</td></tr>'
         }</tbody></table></div>`;
@@ -621,6 +802,16 @@
       .querySelectorAll('[data-revoke]')
       .forEach((b) =>
         b.addEventListener('click', () => changeRole(b.dataset.revoke, b.dataset.id, false)),
+      );
+    // Jump straight to this customer's support notes (pre-filled).
+    view()
+      .querySelectorAll('[data-notes]')
+      .forEach((b) =>
+        b.addEventListener('click', () => {
+          supportCustomer = b.dataset.notes;
+          supportEmail = b.dataset.email;
+          navigate('support');
+        }),
       );
   };
 
@@ -650,22 +841,32 @@
       .select('*')
       .order('name');
     if (error) throw error;
+    const partCounts = {};
+    try {
+      const { data: comps } = await sb.from('product_components').select('filter_product_id');
+      (comps || []).forEach((c) => {
+        partCounts[c.filter_product_id] = (partCounts[c.filter_product_id] || 0) + 1;
+      });
+    } catch (_) {
+      /* table may not exist yet */
+    }
     view().innerHTML = `
       <div class="section-head"><h3>${products.length} product(s)</h3>
         <div class="toolbar"><button class="btn primary" id="newProduct">+ New product</button></div></div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap cards"><table>
         <thead><tr><th>Name</th><th>Category</th><th>Price</th><th>Available</th><th></th></tr></thead>
         <tbody>${
           products
             .map(
               (p) => `<tr>
-          <td><div class="cell-img">${imgTag(firstImage(p))}<div><b>${esc(p.name)}</b><div class="subtle">${esc(p.description || '')}</div></div></div></td>
-          <td>${esc(label(p.category))}</td>
-          <td>${egp(p.price_minor)}</td>
-          <td>${p.available ? '<span class="badge green">Yes</span>' : '<span class="badge red">Sold out</span>'}</td>
+          <td data-label="Name"><div class="cell-img">${imgTag(firstImage(p))}<div><b>${esc(p.name)}</b><div class="subtle">${esc(p.description || '')}</div></div></div></td>
+          <td data-label="Category">${esc(label(p.category))}${p.category === 'filter' ? ` <span class="badge cyan">🧩 ${partCounts[p.id] || 0}</span>` : ''}</td>
+          <td data-label="Price">${egp(p.price_minor)}</td>
+          <td data-label="Available">${p.available ? '<span class="badge green">Yes</span>' : '<span class="badge red">Sold out</span>'}</td>
           <td class="actions">
             <button class="btn ghost small" data-toggle="${p.id}">${p.available ? 'Mark sold out' : 'Mark available'}</button>
             <button class="btn ghost small" data-edit="${p.id}">Edit</button>
+            <button class="btn danger small" data-del="${p.id}">Delete</button>
           </td></tr>`,
             )
             .join('') || '<tr><td colspan="5" class="empty">No products.</td></tr>'
@@ -691,9 +892,66 @@
           navigate('products');
         }),
       );
+    view()
+      .querySelectorAll('[data-del]')
+      .forEach((b) =>
+        b.addEventListener('click', async () => {
+          const p = products.find((x) => x.id === b.dataset.del);
+          const yes = await confirmModal({
+            title: 'Delete product',
+            message: `Delete <b>${esc(p.name)}</b>? This can't be undone.`,
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (!yes) return;
+          const { data: del, error: e } = await sb
+            .from('products')
+            .delete()
+            .eq('id', p.id)
+            .select();
+          if (e) return err(explain(e));
+          if (!del || del.length === 0)
+            return err(
+              "Couldn't delete — it's referenced by an existing order, or the delete policy isn't applied (run admin-deletes.sql).",
+            );
+          ok('Product deleted.');
+          navigate('products');
+        }),
+      );
   };
 
-  function editProduct(p) {
+  async function editProduct(p) {
+    // Cartridge-type products available to bundle into a filter, + existing parts.
+    let cartridgeProducts = [];
+    try {
+      const { data } = await sb
+        .from('products')
+        .select('id,name,price_minor')
+        .eq('category', 'cartridge')
+        .order('name');
+      cartridgeProducts = data || [];
+    } catch (_) {
+      /* ignore */
+    }
+    const cpMap = Object.fromEntries(cartridgeProducts.map((c) => [c.id, c]));
+
+    let components = [];
+    if (p && p.category === 'filter') {
+      const { data } = await sb
+        .from('product_components')
+        .select('*')
+        .eq('filter_product_id', p.id)
+        .order('stage_index');
+      components = (data || []).map((c) => ({
+        cartridge_product_id: c.cartridge_product_id,
+        name: cpMap[c.cartridge_product_id]?.name || '(removed product)',
+        price_minor: cpMap[c.cartridge_product_id]?.price_minor || 0,
+        stage_index: c.stage_index,
+        quantity: c.quantity,
+        note: c.note,
+      }));
+    }
+
     const cats = PRODUCT_CATS.map(
       (c) => `<option value="${c}" ${p?.category === c ? 'selected' : ''}>${label(c)}</option>`,
     ).join('');
@@ -709,13 +967,79 @@
         <label class="field checkbox"><input type="checkbox" name="available" ${!p || p.available ? 'checked' : ''}/> Available for sale</label>
         <div class="field">Images<div id="pGallery"></div>
           <span class="subtle">Upload one or more pictures (the first is used as the app's main image).</span></div>
+        <div class="field" id="pFilterSection"><b>Cartridges in this filter</b>
+          <div id="pComponents"></div>
+          <span class="subtle">Pick the cartridge products this filter is built from (needs admin-product-bundles.sql).</span></div>
       </form>`,
       footHTML: `<button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="pSave">Save</button>`,
     });
     const gallery = mountGallery($('#pGallery'), p?.image_paths || (p?.image_path ? [p.image_path] : []));
+    const form = $('#pForm');
+    const val = (n) => form.querySelector(`[name="${n}"]`);
+    const section = $('#pFilterSection');
+    const compRoot = $('#pComponents');
+
+    function renderComponents() {
+      const sel = cartridgeProducts
+        .map((cp) => `<option value="${cp.id}">${esc(cp.name)} — ${egp(cp.price_minor)}</option>`)
+        .join('');
+      compRoot.innerHTML = `
+        <div class="comp-list">${
+          components.length
+            ? components
+                .map(
+                  (c, i) => `<div class="comp-row">
+            <span>${c.stage_index ? `<b>#${c.stage_index}</b> ` : ''}${esc(c.name)}
+              <span class="subtle">×${c.quantity}${c.note ? ` · ${esc(c.note)}` : ''}</span></span>
+            <button type="button" class="btn ghost small" data-rmcomp="${i}">Remove</button></div>`,
+                )
+                .join('')
+            : '<div class="subtle">No cartridges added yet.</div>'
+        }</div>
+        <div class="comp-add">
+          <select id="compPick">${sel || '<option value="">No cartridge products yet — create some first</option>'}</select>
+          <input id="compStage" type="number" placeholder="Stage #"/>
+          <input id="compQty" type="number" placeholder="Qty" value="1"/>
+          <input id="compNote" placeholder="Note (optional)"/>
+          <button type="button" class="btn primary small" id="compAdd" ${cartridgeProducts.length ? '' : 'disabled'}>Add</button>
+        </div>`;
+      compRoot.querySelectorAll('[data-rmcomp]').forEach((b) =>
+        b.addEventListener('click', () => {
+          components.splice(Number(b.dataset.rmcomp), 1);
+          renderComponents();
+        }),
+      );
+      const addBtn = compRoot.querySelector('#compAdd');
+      if (addBtn)
+        addBtn.addEventListener('click', () => {
+          const id = compRoot.querySelector('#compPick').value;
+          if (!id) return;
+          if (components.some((c) => c.cartridge_product_id === id))
+            return err('That cartridge is already added.');
+          const cp = cpMap[id];
+          const stage = compRoot.querySelector('#compStage').value;
+          const qty = compRoot.querySelector('#compQty').value;
+          const note = compRoot.querySelector('#compNote').value.trim();
+          components.push({
+            cartridge_product_id: id,
+            name: cp.name,
+            price_minor: cp.price_minor,
+            stage_index: stage ? Number(stage) : null,
+            quantity: qty ? Number(qty) : 1,
+            note: note || null,
+          });
+          renderComponents();
+        });
+    }
+
+    function syncSection() {
+      section.style.display = val('category').value === 'filter' ? '' : 'none';
+    }
+    val('category').addEventListener('change', syncSection);
+    syncSection();
+    renderComponents();
+
     $('#pSave').addEventListener('click', async () => {
-      const f = $('#pForm');
-      const val = (n) => f.querySelector(`[name="${n}"]`);
       const name = val('name').value.trim();
       if (!name) return err('Name is required');
       const btn = $('#pSave');
@@ -724,6 +1048,7 @@
       try {
         const newUrls = await uploadFiles(gallery.files(), 'products');
         const images = [...gallery.kept(), ...newUrls];
+        const isFilter = val('category').value === 'filter';
         const payload = {
           name,
           description: val('description').value.trim() || null,
@@ -733,10 +1058,37 @@
           image_paths: images,
           image_path: images[0] || null,
         };
-        const res = p
-          ? await sb.from('products').update(payload).eq('id', p.id)
-          : await sb.from('products').insert(payload);
+        const res = await persistRow({
+          table: 'products',
+          payload,
+          id: p ? p.id : undefined,
+        });
         if (res.error) throw res.error;
+        const productId = res.data.id;
+        // Sync the bundle (delete-all + re-insert) for filter products. Only
+        // surface a bundles-table error when parts were actually added.
+        if (isFilter) {
+          const delRes = await sb
+            .from('product_components')
+            .delete()
+            .eq('filter_product_id', productId);
+          if (delRes.error && components.length) throw delRes.error;
+          if (components.length) {
+            const { error: insErr } = await sb.from('product_components').insert(
+              components.map((c) => ({
+                filter_product_id: productId,
+                cartridge_product_id: c.cartridge_product_id,
+                stage_index: c.stage_index,
+                quantity: c.quantity,
+                note: c.note,
+              })),
+            );
+            if (insErr) throw insErr;
+          }
+        } else {
+          // Best-effort: drop stale parts if this product is no longer a filter.
+          await sb.from('product_components').delete().eq('filter_product_id', productId);
+        }
         ok(p ? 'Product updated.' : 'Product created.');
         closeModal();
         navigate('products');
@@ -758,22 +1110,24 @@
       ${grantsNotice('filter_catalog')}
       <div class="section-head"><h3>${data.length} model(s)</h3>
         <div class="toolbar"><button class="btn primary" id="newModel">+ New model</button></div></div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Name</th><th>Spec</th><th>Stages</th><th>Interval</th><th>QR code</th><th>Active</th><th></th></tr></thead>
+      <div class="table-wrap cards"><table>
+        <thead><tr><th>Name</th><th>Spec</th><th>Stages</th><th>Capacity</th><th>Lifespan</th><th>QR code</th><th>Active</th><th></th></tr></thead>
         <tbody>${
           data
             .map(
               (m) => `<tr>
-          <td><b>${esc(m.name)}</b></td>
-          <td class="subtle">${esc(m.description || '—')}</td>
-          <td>${m.stage_count ?? '—'}</td>
-          <td>${m.replacement_interval_days ? m.replacement_interval_days + ' d' : '—'}</td>
-          <td class="mono">${esc(m.qr_code || '—')}</td>
-          <td>${m.active ? '<span class="badge green">Yes</span>' : '<span class="badge gray">No</span>'}</td>
+          <td data-label="Name"><b>${esc(m.name)}</b></td>
+          <td data-label="Spec" class="subtle">${esc(m.description || '—')}</td>
+          <td data-label="Stages">${m.stage_count ?? '—'}</td>
+          <td data-label="Capacity">${m.capacity_liters ? m.capacity_liters + ' L' : '—'}</td>
+          <td data-label="Lifespan">${m.replacement_interval_days ? m.replacement_interval_days + ' d' : '—'}</td>
+          <td data-label="QR code" class="mono">${esc(m.qr_code || '—')}</td>
+          <td data-label="Active">${m.active ? '<span class="badge green">Yes</span>' : '<span class="badge gray">No</span>'}</td>
           <td class="actions"><button class="btn ghost small" data-edit="${m.id}">Edit</button>
-            <button class="btn ghost small" data-stages="${m.id}" data-name="${esc(m.name)}">Stages</button></td></tr>`,
+            <button class="btn ghost small" data-stages="${m.id}" data-name="${esc(m.name)}">Stages</button>
+            <button class="btn danger small" data-del="${m.id}">Delete</button></td></tr>`,
             )
-            .join('') || '<tr><td colspan="7" class="empty">No catalog models.</td></tr>'
+            .join('') || '<tr><td colspan="8" class="empty">No catalog models.</td></tr>'
         }</tbody></table></div>`;
     $('#newModel').addEventListener('click', () => editModel());
     view()
@@ -790,6 +1144,32 @@
           navigate('cartridges');
         }),
       );
+    view()
+      .querySelectorAll('[data-del]')
+      .forEach((b) =>
+        b.addEventListener('click', async () => {
+          const m = data.find((x) => x.id === b.dataset.del);
+          const yes = await confirmModal({
+            title: 'Delete filter model',
+            message: `Delete <b>${esc(m.name)}</b> and its cartridge stages? This can't be undone.`,
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (!yes) return;
+          const { data: del, error: e } = await sb
+            .from('filter_catalog')
+            .delete()
+            .eq('id', m.id)
+            .select();
+          if (e) return err(explain(e));
+          if (!del || del.length === 0)
+            return err(
+              "Couldn't delete — it's in use by a registered filter, or the manage-catalog policy isn't applied (run admin-grants.sql).",
+            );
+          ok('Filter model deleted.');
+          navigate('catalog');
+        }),
+      );
   };
 
   async function editModel(m) {
@@ -798,9 +1178,12 @@
       fields: [
         { name: 'name', label: 'Name', required: true, value: m?.name },
         { name: 'description', label: 'Spec sublabel', placeholder: '6-stage RO filter', value: m?.description },
-        { name: 'stage_count', label: 'Stage count', type: 'number', value: m?.stage_count },
-        { name: 'capacity_liters', label: 'Capacity (L)', type: 'number', value: m?.capacity_liters },
-        { name: 'replacement_interval_days', label: 'Replace interval (days)', type: 'number', value: m?.replacement_interval_days },
+        { name: 'stage_count', label: 'Stage count', type: 'number', required: true, value: m?.stage_count, help: 'Number of cartridge stages.' },
+        { name: 'capacity_liters', label: 'Capacity (L)', type: 'number', required: true, value: m?.capacity_liters, help: 'Rated liters over the lifespan — drives Water Purified & Total Filtered.' },
+        { name: 'replacement_interval_days', label: 'Lifespan (days)', type: 'number', required: true, value: m?.replacement_interval_days, help: 'Days the filter lasts (e.g. 1000) — drives Filter Health & Days Left. The clock resets when cartridges are changed.' },
+        { name: 'bacteria_per_liter', label: 'Bacteria blocked / L', type: 'number', step: 'any', required: true, value: m?.bacteria_per_liter, help: 'Bacteria removed per liter — drives the Bacteria Blocked stat (rate × liters).' },
+        { name: 'chemicals_mg_per_liter', label: 'Chemicals removed (mg / L)', type: 'number', step: 'any', required: true, value: m?.chemicals_mg_per_liter, help: 'Milligrams of chemicals removed per liter — drives Chemicals Filtered.' },
+        { name: 'kwh_per_liter', label: 'Energy saved (kWh / L)', type: 'number', step: 'any', required: true, value: m?.kwh_per_liter, help: 'kWh saved per liter — drives Energy Saved.' },
         { name: 'image_path', label: 'Image URL', value: m?.image_path },
         { name: 'qr_code', label: 'QR / serial code', value: m?.qr_code, help: 'A scan of this code preselects this model.' },
         { name: 'active', label: 'Active (shown to customers)', type: 'checkbox', value: m ? m.active : true },
@@ -850,18 +1233,18 @@
           <button class="btn primary" id="newStage" ${cartridgeModelId ? '' : 'disabled'}>+ Add stage</button>
         </div>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap cards"><table>
         <thead><tr><th>#</th><th>Name</th><th>Type</th><th>Lifespan</th><th>Capacity</th><th>Micron</th><th></th></tr></thead>
         <tbody>${
           stages
             .map(
               (s) => `<tr>
-          <td><b>${s.stage_index}</b></td>
-          <td><div class="cell-img">${imgTag(firstImage(s))}<div>${esc(s.name)}<div class="subtle">${esc(s.about || '')}</div></div></div></td>
-          <td class="subtle">${esc(s.type || '—')}</td>
-          <td>${s.lifespan_days ? s.lifespan_days + ' d' : '—'}</td>
-          <td>${s.capacity_liters ? s.capacity_liters + ' L' : '—'}</td>
-          <td>${s.micron ?? '—'}</td>
+          <td data-label="Stage"><b>${s.stage_index}</b></td>
+          <td data-label="Name"><div class="cell-img">${imgTag(firstImage(s))}<div>${esc(s.name)}<div class="subtle">${esc(s.about || '')}</div></div></div></td>
+          <td data-label="Type" class="subtle">${esc(s.type || '—')}</td>
+          <td data-label="Lifespan">${s.lifespan_days ? s.lifespan_days + ' d' : '—'}</td>
+          <td data-label="Capacity">${s.capacity_liters ? s.capacity_liters + ' L' : '—'}</td>
+          <td data-label="Micron">${s.micron ?? '—'}</td>
           <td class="actions"><button class="btn ghost small" data-edit="${s.id}">Edit</button>
             <button class="btn danger small" data-del="${s.id}">Delete</button></td></tr>`,
             )
@@ -885,8 +1268,16 @@
         b.addEventListener('click', async () => {
           if (!(await confirmModal({ title: 'Delete stage', message: 'Remove this cartridge stage?', confirmLabel: 'Delete', danger: true })))
             return;
-          const { error } = await sb.from('catalog_cartridges').delete().eq('id', b.dataset.del);
+          const { data: del, error } = await sb
+            .from('catalog_cartridges')
+            .delete()
+            .eq('id', b.dataset.del)
+            .select();
           if (error) return err(explain(error));
+          if (!del || del.length === 0)
+            return err(
+              "Couldn't delete — the manage-cartridges policy isn't applied (run admin-grants.sql).",
+            );
           ok('Stage deleted.');
           navigate('cartridges');
         }),
@@ -938,9 +1329,11 @@
           micron: num('micron'),
           image_paths: [...gallery.kept(), ...newUrls],
         };
-        const res = s
-          ? await sb.from('catalog_cartridges').update(payload).eq('id', s.id)
-          : await sb.from('catalog_cartridges').insert(payload);
+        const res = await persistRow({
+          table: 'catalog_cartridges',
+          payload,
+          id: s ? s.id : undefined,
+        });
         if (res.error) throw res.error;
         ok(s ? 'Stage updated.' : 'Stage added.');
         closeModal();
@@ -963,18 +1356,19 @@
       ${grantsNotice('payment_methods')}
       <div class="section-head"><h3>${data.length} method(s)</h3>
         <div class="toolbar"><button class="btn primary" id="newPay">+ New method</button></div></div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap cards"><table>
         <thead><tr><th>Order</th><th>Name</th><th>Key</th><th>Account</th><th>Active</th><th></th></tr></thead>
         <tbody>${
           data
             .map(
               (p) => `<tr>
-          <td>${p.sort_order}</td>
-          <td><b>${esc(p.name)}</b><div class="subtle">${esc(p.secondary || '')}</div></td>
-          <td class="mono">${esc(p.key)}</td>
-          <td>${esc(p.account)}</td>
-          <td>${p.active ? '<span class="badge green">Yes</span>' : '<span class="badge gray">No</span>'}</td>
-          <td class="actions"><button class="btn ghost small" data-edit="${p.id}">Edit</button></td></tr>`,
+          <td data-label="Sort">${p.sort_order}</td>
+          <td data-label="Name"><b>${esc(p.name)}</b><div class="subtle">${esc(p.secondary || '')}</div></td>
+          <td data-label="Key" class="mono">${esc(p.key)}</td>
+          <td data-label="Account">${esc(p.account)}</td>
+          <td data-label="Active">${p.active ? '<span class="badge green">Yes</span>' : '<span class="badge gray">No</span>'}</td>
+          <td class="actions"><button class="btn ghost small" data-edit="${p.id}">Edit</button>
+            <button class="btn danger small" data-del="${p.id}">Delete</button></td></tr>`,
             )
             .join('') || '<tr><td colspan="6" class="empty">No payment methods.</td></tr>'
         }</tbody></table></div>`;
@@ -983,6 +1377,32 @@
       .querySelectorAll('[data-edit]')
       .forEach((b) =>
         b.addEventListener('click', () => editPayment(data.find((p) => p.id === b.dataset.edit))),
+      );
+    view()
+      .querySelectorAll('[data-del]')
+      .forEach((b) =>
+        b.addEventListener('click', async () => {
+          const p = data.find((x) => x.id === b.dataset.del);
+          const yes = await confirmModal({
+            title: 'Delete payment method',
+            message: `Delete <b>${esc(p.name)}</b>?`,
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (!yes) return;
+          const { data: del, error: e } = await sb
+            .from('payment_methods')
+            .delete()
+            .eq('id', p.id)
+            .select();
+          if (e) return err(explain(e));
+          if (!del || del.length === 0)
+            return err(
+              "Couldn't delete — the manage-payment-methods policy isn't applied (run admin-deletes.sql / admin-grants.sql).",
+            );
+          ok('Payment method deleted.');
+          navigate('payments');
+        }),
       );
   };
 
@@ -1022,15 +1442,16 @@
       <div class="notice">A broadcast with audience <b>all</b> fans out a notification to every user's alert inbox.</div>
       <div class="section-head"><h3>${data.length} broadcast(s)</h3>
         <div class="toolbar"><button class="btn primary" id="newBroadcast">+ New broadcast</button></div></div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Title</th><th>Body</th><th>Audience</th><th>Sent</th></tr></thead>
+      <div class="table-wrap cards"><table>
+        <thead><tr><th>Title</th><th>Body</th><th>Audience</th><th>Sent</th><th></th></tr></thead>
         <tbody>${
           data
             .map(
-              (b) => `<tr><td><b>${esc(b.title)}</b></td><td class="subtle">${esc(b.body)}</td>
-              <td>${esc(b.audience)}</td><td class="subtle">${fmtDate(b.created_at)}</td></tr>`,
+              (b) => `<tr><td data-label="Title"><b>${esc(b.title)}</b></td><td data-label="Body" class="subtle">${esc(b.body)}</td>
+              <td data-label="Audience">${esc(b.audience)}</td><td data-label="Sent" class="subtle">${fmtDate(b.created_at)}</td>
+              <td class="actions"><button class="btn danger small" data-del="${b.id}">Delete</button></td></tr>`,
             )
-            .join('') || '<tr><td colspan="4" class="empty">No broadcasts yet.</td></tr>'
+            .join('') || '<tr><td colspan="5" class="empty">No broadcasts yet.</td></tr>'
         }</tbody></table></div>`;
     $('#newBroadcast').addEventListener('click', async () => {
       const out = await formModal({
@@ -1055,32 +1476,187 @@
       ok('Broadcast sent.');
       navigate('broadcasts');
     });
+    view()
+      .querySelectorAll('[data-del]')
+      .forEach((btn) =>
+        btn.addEventListener('click', async () => {
+          const b = data.find((x) => x.id === btn.dataset.del);
+          const yes = await confirmModal({
+            title: 'Delete broadcast',
+            message: `Delete <b>${esc(b.title)}</b>? (Alerts already sent to users stay in their inboxes.)`,
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (!yes) return;
+          const { data: del, error: e } = await sb
+            .from('broadcasts')
+            .delete()
+            .eq('id', b.id)
+            .select();
+          if (e) return err(explain(e));
+          if (!del || del.length === 0)
+            return err(
+              "Couldn't delete — the broadcast delete policy isn't applied (run admin-deletes.sql).",
+            );
+          ok('Broadcast deleted.');
+          navigate('broadcasts');
+        }),
+      );
+  };
+
+  // ============================================================
+  // SERVICE REQUESTS
+  // ============================================================
+  let serviceStatus = 'open';
+  const svcBadge = (s) =>
+    s === 'open'
+      ? '<span class="badge amber">Open</span>'
+      : s === 'in_progress'
+        ? '<span class="badge blue">In progress</span>'
+        : '<span class="badge green">Resolved</span>';
+  SECTIONS.service = async () => {
+    let q = sb
+      .from('service_requests')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(300);
+    if (serviceStatus) q = q.eq('status', serviceStatus);
+    const { data, error } = await q;
+    if (error) throw error;
+    // Resolve customer UUIDs to emails so requests read "who asked".
+    const email = new Map();
+    const { data: users } = await sb.from('admin_users').select('id, identity');
+    (users || []).forEach((u) => email.set(u.id, u.identity));
+    const filters = ['open', 'in_progress', 'resolved', ''];
+    view().innerHTML = `
+      <div class="notice">Customers raise these from the app when their filter health is low
+        (≈15%). Move them <b>Open → In progress → Resolved</b> as you service the filter and
+        replace cartridges.</div>
+      <div class="section-head"><h3>${data.length} request(s)</h3>
+        <div class="toolbar"><select id="svcStatus">${filters
+          .map(
+            (s) =>
+              `<option value="${s}" ${s === serviceStatus ? 'selected' : ''}>${s ? label(s) : 'All'}</option>`,
+          )
+          .join('')}</select></div></div>
+      <div class="table-wrap cards"><table>
+        <thead><tr><th>When</th><th>Customer</th><th>Filter</th><th>Health</th><th>Note</th><th>Status</th><th></th></tr></thead>
+        <tbody>${
+          data
+            .map(
+              (r) => `<tr>
+          <td data-label="When" class="subtle">${fmtDate(r.created_at)}</td>
+          <td data-label="Customer">${email.has(r.user_id) ? esc(email.get(r.user_id)) : `<span class="mono">${short(r.user_id)}</span>`}</td>
+          <td data-label="Filter" class="mono">${r.device_id ? short(r.device_id) : '—'}</td>
+          <td data-label="Health">${r.health_percent != null ? r.health_percent + '%' : '—'}</td>
+          <td data-label="Note">${esc(r.note || '—')}</td>
+          <td data-label="Status">${svcBadge(r.status)}</td>
+          <td class="actions">
+            ${r.status === 'open' ? `<button class="btn ghost small" data-progress="${r.id}">Start</button>` : ''}
+            ${r.status !== 'resolved' ? `<button class="btn primary small" data-resolve="${r.id}">Resolve</button>` : ''}
+          </td></tr>`,
+            )
+            .join('') || '<tr><td colspan="7" class="empty">No service requests.</td></tr>'
+        }</tbody></table></div>`;
+    $('#svcStatus').addEventListener('change', (e) => {
+      serviceStatus = e.target.value;
+      navigate('service');
+    });
+    const setStatus = async (id, status) => {
+      const patch = { status };
+      if (status === 'resolved') patch.resolved_at = new Date().toISOString();
+      const { data: upd, error: e } = await sb
+        .from('service_requests')
+        .update(patch)
+        .eq('id', id)
+        .select();
+      if (e) return err(explain(e));
+      if (!upd || upd.length === 0)
+        return err(
+          "Couldn't update — the admin policy isn't applied (run service-requests.sql).",
+        );
+      ok('Request updated.');
+      navigate('service');
+    };
+    view()
+      .querySelectorAll('[data-progress]')
+      .forEach((b) =>
+        b.addEventListener('click', () => setStatus(b.dataset.progress, 'in_progress')),
+      );
+    view()
+      .querySelectorAll('[data-resolve]')
+      .forEach((b) =>
+        b.addEventListener('click', () => setStatus(b.dataset.resolve, 'resolved')),
+      );
   };
 
   // ============================================================
   // SUPPORT NOTES
   // ============================================================
-  let supportCustomer = '';
+  let supportCustomer = ''; // selected customer's user ID (uuid)
+  let supportEmail = ''; // their email/identity, for display
   SECTIONS.support = async () => {
+    // Load the user directory so the admin can pick a customer by email
+    // instead of hunting down and pasting a raw UUID.
+    const { data: users, error: uErr } = await sb
+      .from('admin_users')
+      .select('id, identity')
+      .order('identity');
+    const directory = uErr ? [] : users || [];
+    const byId = new Map(directory.map((u) => [u.id, u.identity]));
+    if (supportCustomer && !supportEmail) supportEmail = byId.get(supportCustomer) || '';
+
     view().innerHTML = `
       <div class="section-head"><h3>Customer support notes</h3></div>
       <div class="card" style="margin-bottom:16px">
         <div class="toolbar">
-          <input class="search" id="custId" placeholder="Customer user ID (uuid)" value="${esc(supportCustomer)}" style="min-width:340px"/>
+          <input class="search" id="custPick" list="custList" autocomplete="off"
+            placeholder="Search customer by email…" value="${esc(supportEmail || supportCustomer)}" style="min-width:340px"/>
+          <datalist id="custList">${directory
+            .map((u) => `<option value="${esc(u.identity)}"></option>`)
+            .join('')}</datalist>
           <button class="btn primary" id="loadNotes">Load notes</button>
           <button class="btn ghost" id="addNote" ${supportCustomer ? '' : 'disabled'}>+ Add note</button>
         </div>
-        <p class="subtle" style="margin:10px 0 0">Find a customer's user ID in the Users tab. Notes are admin-only and audited.</p>
+        <p class="subtle" style="margin:10px 0 0">Pick a customer by email (or paste their user ID). Notes are
+          admin-only, PII-free, and audited.${
+            uErr ? ' <span class="error">Couldn\'t load the customer list — paste a user ID instead.</span>' : ''
+          }</p>
       </div>
       <div id="notesWrap"></div>`;
-    $('#custId').addEventListener('input', (e) => (supportCustomer = e.target.value.trim()));
-    $('#loadNotes').addEventListener('click', () => loadNotes());
+
+    const pick = $('#custPick');
+    // Resolve whatever's typed to a (UUID, email) pair: an email match maps to
+    // its UUID; anything else is treated as a raw UUID paste.
+    const resolve = () => {
+      const v = pick.value.trim();
+      const hit = directory.find((u) => (u.identity || '').toLowerCase() === v.toLowerCase());
+      if (hit) {
+        supportCustomer = hit.id;
+        supportEmail = hit.identity;
+      } else {
+        supportCustomer = v;
+        supportEmail = byId.get(v) || '';
+      }
+    };
+    pick.addEventListener('input', resolve);
+    pick.addEventListener('change', resolve);
+    pick.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        resolve();
+        loadNotes();
+      }
+    });
+    $('#loadNotes').addEventListener('click', () => {
+      resolve();
+      loadNotes();
+    });
     $('#addNote').addEventListener('click', () => addNote());
     if (supportCustomer) loadNotes();
   };
 
   async function loadNotes() {
-    if (!supportCustomer) return err('Enter a customer user ID.');
+    if (!supportCustomer) return err('Pick a customer (by email) or paste their user ID first.');
     const { data, error } = await sb
       .from('support_notes')
       .select('*')
@@ -1091,17 +1667,45 @@
       wrap.innerHTML = `<div class="card"><p class="error">${esc(explain(error))}</p></div>`;
       return;
     }
-    $('#addNote').disabled = false;
-    wrap.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>Note</th><th>Order</th><th>Added</th></tr></thead>
+    const addBtn = $('#addNote');
+    if (addBtn) addBtn.disabled = false;
+    const who = supportEmail ? `${esc(supportEmail)} · ` : '';
+    wrap.innerHTML = `<div class="card" style="margin-bottom:12px"><p class="subtle" style="margin:0">
+        ${(data || []).length} note(s) for <b>${who}</b><span class="mono">${esc(short(supportCustomer))}</span></p></div>
+      <div class="table-wrap cards"><table>
+      <thead><tr><th>Note</th><th>Order</th><th>Added</th><th></th></tr></thead>
       <tbody>${
         (data || [])
           .map(
-            (n) => `<tr><td>${esc(n.body)}</td><td class="mono">${n.order_id ? short(n.order_id) : '—'}</td>
-            <td class="subtle">${fmtDate(n.created_at)}</td></tr>`,
+            (n) => `<tr><td data-label="Note">${esc(n.body)}</td><td data-label="Order" class="mono">${n.order_id ? short(n.order_id) : '—'}</td>
+            <td data-label="Added" class="subtle">${fmtDate(n.created_at)}</td>
+            <td class="actions"><button class="btn danger small" data-del="${n.id}">Delete</button></td></tr>`,
           )
-          .join('') || '<tr><td colspan="3" class="empty">No notes for this customer.</td></tr>'
+          .join('') || '<tr><td colspan="4" class="empty">No notes for this customer.</td></tr>'
       }</tbody></table></div>`;
+    wrap.querySelectorAll('[data-del]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        const yes = await confirmModal({
+          title: 'Delete note',
+          message: 'Delete this support note?',
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (!yes) return;
+        const { data: del, error: e } = await sb
+          .from('support_notes')
+          .delete()
+          .eq('id', btn.dataset.del)
+          .select();
+        if (e) return err(explain(e));
+        if (!del || del.length === 0)
+          return err(
+            "Couldn't delete — the note delete policy isn't applied (run admin-safe-delete.sql).",
+          );
+        ok('Note deleted.');
+        loadNotes();
+      }),
+    );
   }
 
   async function addNote() {
@@ -1133,6 +1737,10 @@
     if (auditType) q = q.eq('target_type', auditType);
     const { data, error } = await q;
     if (error) throw error;
+    // Resolve actor UUIDs to emails so the log reads "who did what".
+    const actorEmail = new Map();
+    const { data: actors } = await sb.from('admin_users').select('id, identity');
+    (actors || []).forEach((u) => actorEmail.set(u.id, u.identity));
     const types = ['', 'user', 'order', 'product', 'note'];
     view().innerHTML = `
       <div class="notice">The audit log is append-only and server-written. You can read &amp; filter, never edit.</div>
@@ -1140,17 +1748,23 @@
         <div class="toolbar"><select id="auditType">${types
           .map((t) => `<option value="${t}" ${t === auditType ? 'selected' : ''}>${t ? label(t) : 'All targets'}</option>`)
           .join('')}</select></div></div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap cards"><table>
         <thead><tr><th>When</th><th>Action</th><th>Target</th><th>Target ID</th><th>Actor</th></tr></thead>
         <tbody>${
           data
             .map(
               (a) => `<tr>
-          <td class="subtle">${fmtDate(a.created_at)}</td>
-          <td><span class="badge blue">${esc(a.action)}</span></td>
-          <td>${esc(a.target_type)}</td>
-          <td class="mono">${esc(short(a.target_id))}</td>
-          <td class="mono">${a.actor_id ? short(a.actor_id) : 'system'}</td></tr>`,
+          <td data-label="When" class="subtle">${fmtDate(a.created_at)}</td>
+          <td data-label="Action"><span class="badge blue">${esc(a.action)}</span></td>
+          <td data-label="Target">${esc(a.target_type)}</td>
+          <td data-label="Target ID" class="mono">${esc(short(a.target_id))}</td>
+          <td data-label="Actor">${
+            a.actor_id
+              ? actorEmail.has(a.actor_id)
+                ? esc(actorEmail.get(a.actor_id))
+                : `<span class="mono">${short(a.actor_id)}</span>`
+              : 'system'
+          }</td></tr>`,
             )
             .join('') || '<tr><td colspan="5" class="empty">No audit entries.</td></tr>'
         }</tbody></table></div>`;
