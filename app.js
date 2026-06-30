@@ -1173,6 +1173,28 @@
   };
 
   async function editModel(m) {
+    // Optional motor link. Only offered if motors.sql is applied (table reads
+    // without error); otherwise the field is omitted so saving still works.
+    const { data: motors, error: motorErr } = await sb
+      .from('filter_motors')
+      .select('id,name')
+      .order('name');
+    const motorField =
+      !motorErr
+        ? [
+            {
+              name: 'motor_id',
+              label: 'Motor (optional)',
+              type: 'select',
+              value: m?.motor_id ?? '',
+              help: 'Only for filters that have a motor/pump. Manage motors in the Motors tab.',
+              options: [
+                { value: '', label: '— None —' },
+                ...(motors || []).map((x) => ({ value: x.id, label: x.name })),
+              ],
+            },
+          ]
+        : [];
     const out = await formModal({
       title: m ? 'Edit model' : 'New filter model',
       fields: [
@@ -1186,6 +1208,7 @@
         { name: 'kwh_per_liter', label: 'Energy saved (kWh / L)', type: 'number', step: 'any', required: true, value: m?.kwh_per_liter, help: 'kWh saved per liter — drives Energy Saved.' },
         { name: 'image_path', label: 'Image URL', value: m?.image_path },
         { name: 'qr_code', label: 'QR / serial code', value: m?.qr_code, help: 'A scan of this code preselects this model.' },
+        ...motorField,
         { name: 'active', label: 'Active (shown to customers)', type: 'checkbox', value: m ? m.active : true },
       ],
     });
@@ -1338,6 +1361,120 @@
         ok(s ? 'Stage updated.' : 'Stage added.');
         closeModal();
         navigate('cartridges');
+      } catch (e) {
+        err(explain(e));
+        btn.disabled = false;
+        btn.textContent = 'Save';
+      }
+    });
+  }
+
+  // ============================================================
+  // MOTORS  (needs motors.sql) — optional motor/pump details for some filters
+  // ============================================================
+  SECTIONS.motors = async () => {
+    const { data, error } = await sb.from('filter_motors').select('*').order('name');
+    if (error) throw error;
+    view().innerHTML = `
+      ${grantsNotice('filter_motors')}
+      <div class="section-head"><h3>${data.length} motor(s)</h3>
+        <div class="toolbar"><button class="btn primary" id="newMotor">+ New motor</button></div></div>
+      <p class="subtle" style="margin:-4px 0 12px">Optional — only filters that have a motor/pump need one. Name is the only required field.</p>
+      <div class="table-wrap cards"><table>
+        <thead><tr><th>Name</th><th>Capacity</th><th>Material</th><th>Description</th><th>Active</th><th></th></tr></thead>
+        <tbody>${
+          data
+            .map(
+              (m) => `<tr>
+          <td data-label="Name"><div class="cell-img">${imgTag(firstImage(m))}<div><b>${esc(m.name)}</b></div></div></td>
+          <td data-label="Capacity">${esc(m.capacity || '—')}</td>
+          <td data-label="Material" class="subtle">${esc(m.material || '—')}</td>
+          <td data-label="Description" class="subtle">${esc(m.description || '—')}</td>
+          <td data-label="Active">${m.active ? '<span class="badge green">Yes</span>' : '<span class="badge gray">No</span>'}</td>
+          <td class="actions"><button class="btn ghost small" data-edit="${m.id}">Edit</button>
+            <button class="btn danger small" data-del="${m.id}">Delete</button></td></tr>`,
+            )
+            .join('') || '<tr><td colspan="6" class="empty">No motors yet.</td></tr>'
+        }</tbody></table></div>`;
+    $('#newMotor').addEventListener('click', () => editMotor());
+    view()
+      .querySelectorAll('[data-edit]')
+      .forEach((b) =>
+        b.addEventListener('click', () => editMotor(data.find((m) => m.id === b.dataset.edit))),
+      );
+    view()
+      .querySelectorAll('[data-del]')
+      .forEach((b) =>
+        b.addEventListener('click', async () => {
+          const m = data.find((x) => x.id === b.dataset.del);
+          const yes = await confirmModal({
+            title: 'Delete motor',
+            message: `Delete <b>${esc(m.name)}</b>? Filters linked to it will keep working but lose the motor reference.`,
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (!yes) return;
+          const { data: del, error: e } = await sb
+            .from('filter_motors')
+            .delete()
+            .eq('id', m.id)
+            .select();
+          if (e) return err(explain(e));
+          if (!del || del.length === 0)
+            return err(
+              "Couldn't delete — the manage-motors policy isn't applied (run motors.sql).",
+            );
+          ok('Motor deleted.');
+          navigate('motors');
+        }),
+      );
+  };
+
+  function editMotor(m) {
+    modal({
+      title: m ? 'Edit motor' : 'New motor',
+      bodyHTML: `<form id="mtForm" class="grid" style="gap:14px">
+        <label class="field">Name<input name="name" value="${esc(m?.name || '')}" placeholder="e.g. Booster Pump 100 GPD"/></label>
+        <div class="row2">
+          <label class="field">Capacity<input name="capacity" value="${esc(m?.capacity || '')}" placeholder="e.g. 100 GPD / 75 W"/></label>
+          <label class="field">Material<input name="material" value="${esc(m?.material || '')}" placeholder="e.g. Stainless steel"/></label>
+        </div>
+        <label class="field">Description<textarea name="description" rows="3">${esc(m?.description || '')}</textarea></label>
+        <label class="field checkbox"><input type="checkbox" name="active" ${m ? (m.active ? 'checked' : '') : 'checked'}/> Active (shown to customers)</label>
+        <div class="field">Pictures (optional)<div id="mtGallery"></div>
+          <span class="subtle">Upload one or more pictures of the motor. Not required.</span></div>
+      </form>`,
+      footHTML: `<button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="mtSave">Save</button>`,
+    });
+    const gallery = mountGallery($('#mtGallery'), m?.image_paths || []);
+    $('#mtSave').addEventListener('click', async () => {
+      const f = $('#mtForm');
+      const val = (n) => f.querySelector(`[name="${n}"]`);
+      const name = val('name').value.trim();
+      if (!name) return err('Name is required');
+      const btn = $('#mtSave');
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        const newUrls = await uploadFiles(gallery.files(), 'motors');
+        const text = (n) => (val(n).value.trim() === '' ? null : val(n).value.trim());
+        const payload = {
+          name,
+          capacity: text('capacity'),
+          material: text('material'),
+          description: text('description'),
+          active: val('active').checked,
+          image_paths: [...gallery.kept(), ...newUrls],
+        };
+        const res = await persistRow({
+          table: 'filter_motors',
+          payload,
+          id: m ? m.id : undefined,
+        });
+        if (res.error) throw res.error;
+        ok(m ? 'Motor updated.' : 'Motor created.');
+        closeModal();
+        navigate('motors');
       } catch (e) {
         err(explain(e));
         btn.disabled = false;
