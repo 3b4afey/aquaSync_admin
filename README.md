@@ -36,8 +36,9 @@ your account an admin the first time, see Step 2 in `../supabase/SETUP.md`
 | **Broadcasts** | Send a push/alert to all users; view past broadcasts | ✅ |
 | **Support Notes** | Look up a customer (by user ID) and add admin-only notes | ✅ |
 | **Audit Log** | Read + filter the append-only audit trail | ✅ |
-| **Filter Catalog** | Create / edit filter models (specs, image, QR code, interval) | ⚠️ needs `admin-grants.sql` |
+| **Filter Catalog** | Create / edit filter models (specs, image, QR code, interval, optional motor) | ⚠️ needs `admin-grants.sql` |
 | **Cartridges** | Manage the cartridge stages per model | ⚠️ needs `admin-grants.sql` |
+| **Motors** | Optional motor/pump details (name + capacity, material, description, pics) for filters that have one | ⚠️ needs `motors.sql` |
 | **Payment Methods** | Add / edit Vodafone Cash / InstaPay etc. | ⚠️ needs `admin-grants.sql` |
 
 ### Enabling the last three tabs
@@ -47,6 +48,16 @@ clients. To let admins manage them from the console, run **`admin-grants.sql`**
 once in the Supabase SQL editor (Dashboard → SQL). It only adds `is_admin()`-gated
 policies and is safe to re-run. Until then those tabs can read but saving shows a
 permissions notice.
+
+### Enabling the Motors tab
+
+Some filters have a motor/pump and most don't, so motor info is **optional** and
+lives in its own record. Run **`motors.sql`** once in the Supabase SQL editor to
+create the `filter_motors` table (and the optional `filter_catalog.motor_id`
+link). After that the **Motors** tab lets you add motors — only **Name** is
+required; capacity, material, description, and pictures are all optional — and
+the filter-model editor gains an optional **Motor** dropdown. Until the SQL is
+applied, the tab reads empty and the dropdown is hidden.
 
 ## Roles: admin vs head admin
 
