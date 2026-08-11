@@ -136,13 +136,17 @@
     });
   }
 
-  // Generic form modal. fields: [{name,label,type,options,required,placeholder,help,value}]
+  // Generic form modal.
+  // fields: [{name,label,type,options,required,placeholder,help,value,dir}]
+  // `dir: 'rtl'` renders the control right-to-left — used for the Arabic
+  // translation of every customer-visible field.
   function formModal({ title, fields, submitLabel = 'Save' }) {
     return new Promise((resolve) => {
       const inputHTML = (f) => {
         const v = f.value ?? '';
+        const dir = f.dir ? ` dir="${f.dir}"` : '';
         if (f.type === 'textarea')
-          return `<textarea name="${f.name}" rows="3" placeholder="${esc(f.placeholder || '')}">${esc(v)}</textarea>`;
+          return `<textarea name="${f.name}"${dir} rows="3" placeholder="${esc(f.placeholder || '')}">${esc(v)}</textarea>`;
         if (f.type === 'select')
           return `<select name="${f.name}">${f.options
             .map(
@@ -152,7 +156,7 @@
             .join('')}</select>`;
         if (f.type === 'checkbox')
           return `<label class="field checkbox"><input type="checkbox" name="${f.name}" ${v ? 'checked' : ''}/> ${esc(f.label)}</label>`;
-        return `<input type="${f.type || 'text'}" name="${f.name}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}" ${f.step ? `step="${f.step}"` : ''}/>`;
+        return `<input type="${f.type || 'text'}" name="${f.name}"${dir} value="${esc(v)}" placeholder="${esc(f.placeholder || '')}" ${f.step ? `step="${f.step}"` : ''}/>`;
       };
       const body = fields
         .map((f) => {
@@ -1148,7 +1152,10 @@
       bodyHTML: `<form id="pForm" class="form-2col">
         <div class="form-col">
           <label class="field">Name<input name="name" value="${esc(p?.name || '')}" placeholder="AquaInfinity 7-Stage RO"/></label>
+          <label class="field">الاسم بالعربية<input name="name_ar" dir="rtl" value="${esc(p?.name_ar || '')}" placeholder="أكوا إنفينيتي 7 مراحل"/>
+            <span class="subtle">Shown to customers using the app in Arabic. Leave blank to fall back to the English name.</span></label>
           <label class="field">Description<textarea name="description" rows="3" placeholder="Short description shown in the shop">${esc(p?.description || '')}</textarea></label>
+          <label class="field">الوصف بالعربية<textarea name="description_ar" dir="rtl" rows="3" placeholder="وصف قصير يظهر في المتجر">${esc(p?.description_ar || '')}</textarea></label>
           <div class="row2">
             <label class="field">Price (EGP)<input name="price_egp" type="number" step="0.01" value="${p ? p.price_minor / 100 : ''}" placeholder="0.00"/></label>
             <label class="field">Category<select name="category">${cats}</select></label>
@@ -1263,7 +1270,11 @@
         const isFilter = val('category').value === 'filter';
         const payload = {
           name,
+          // Blank Arabic is stored as NULL, which the app reads as "no
+          // translation yet" and falls back to the English text.
+          name_ar: val('name_ar').value.trim() || null,
           description: val('description').value.trim() || null,
+          description_ar: val('description_ar').value.trim() || null,
           price_minor: Math.round(Number(val('price_egp').value || 0) * 100),
           category: val('category').value,
           available: val('available').checked,
@@ -1435,7 +1446,21 @@
       title: m ? 'Edit model' : 'New filter model',
       fields: [
         { name: 'name', label: 'Name', required: true, value: m?.name },
+        {
+          name: 'name_ar',
+          label: 'الاسم بالعربية',
+          dir: 'rtl',
+          value: m?.name_ar,
+          help: 'Shown in the Arabic app. Blank ⇒ falls back to the English name.',
+        },
         { name: 'description', label: 'Spec sublabel', placeholder: '6-stage RO filter', value: m?.description },
+        {
+          name: 'description_ar',
+          label: 'الوصف بالعربية',
+          dir: 'rtl',
+          placeholder: 'فلتر 6 مراحل',
+          value: m?.description_ar,
+        },
         { name: 'stage_count', label: 'Stage count', type: 'number', required: true, value: m?.stage_count, help: 'Number of cartridge stages.' },
         { name: 'capacity_liters', label: 'Capacity (L)', type: 'number', required: true, value: m?.capacity_liters, help: 'Rated liters over the lifespan — drives Water Purified & Total Filtered.' },
         { name: 'replacement_interval_days', label: 'Lifespan (days)', type: 'number', required: true, value: m?.replacement_interval_days, help: 'Days the filter lasts (e.g. 1000) — drives Filter Health & Days Left. The clock resets when cartridges are changed.' },
@@ -1553,8 +1578,12 @@
           <label class="field">Stage #<input name="stage_index" type="number" value="${s?.stage_index ?? nextIndex ?? 1}"/></label>
           <label class="field">Name<input name="name" value="${esc(s?.name || '')}" placeholder="Sediment Filter"/></label>
         </div>
+        <label class="field">الاسم بالعربية<input name="name_ar" dir="rtl" value="${esc(s?.name_ar || '')}" placeholder="فلتر الرواسب"/>
+          <span class="subtle">Blank ⇒ the Arabic app falls back to the English text (same for the two fields below).</span></label>
         <label class="field">Type / material<input name="type" value="${esc(s?.type || '')}" placeholder="PP Cotton"/></label>
+        <label class="field">النوع / الخامة بالعربية<input name="type_ar" dir="rtl" value="${esc(s?.type_ar || '')}" placeholder="قطن بولي بروبيلين"/></label>
         <label class="field">About<textarea name="about" rows="2">${esc(s?.about || '')}</textarea></label>
+        <label class="field">الوصف بالعربية<textarea name="about_ar" dir="rtl" rows="2">${esc(s?.about_ar || '')}</textarea></label>
         <div class="row2">
           <label class="field">Lifespan (days)<input name="lifespan_days" type="number" value="${s?.lifespan_days ?? ''}"/></label>
           <label class="field">Capacity (L)<input name="capacity_liters" type="number" value="${s?.capacity_liters ?? ''}"/></label>
@@ -1583,8 +1612,11 @@
           catalog_model_id: cartridgeModelId,
           stage_index: stageIndex,
           name,
+          name_ar: val('name_ar').value.trim() || null,
           type: val('type').value.trim() || null,
+          type_ar: val('type_ar').value.trim() || null,
           about: val('about').value.trim() || null,
+          about_ar: val('about_ar').value.trim() || null,
           lifespan_days: num('lifespan_days'),
           capacity_liters: num('capacity_liters'),
           micron: num('micron'),
@@ -1787,9 +1819,24 @@
       fields: [
         { name: 'key', label: 'Key (stored on orders)', required: true, value: p?.key, placeholder: 'vodafone_cash' },
         { name: 'name', label: 'Display name', required: true, value: p?.name, placeholder: 'Vodafone Cash' },
+        {
+          name: 'name_ar',
+          label: 'الاسم بالعربية',
+          dir: 'rtl',
+          value: p?.name_ar,
+          help: 'Blank ⇒ the Arabic app falls back to the English text (same for the fields below). The account number is never translated.',
+        },
         { name: 'account', label: 'Account / number', required: true, value: p?.account },
         { name: 'secondary', label: 'Secondary line', value: p?.secondary },
+        { name: 'secondary_ar', label: 'السطر الثانوي بالعربية', dir: 'rtl', value: p?.secondary_ar },
         { name: 'instructions', label: 'Instructions', type: 'textarea', value: p?.instructions },
+        {
+          name: 'instructions_ar',
+          label: 'التعليمات بالعربية',
+          dir: 'rtl',
+          type: 'textarea',
+          value: p?.instructions_ar,
+        },
         { name: 'sort_order', label: 'Sort order', type: 'number', value: p?.sort_order ?? 0 },
         { name: 'active', label: 'Active', type: 'checkbox', value: p ? p.active : true },
       ],
@@ -1835,6 +1882,13 @@
         fields: [
           { name: 'title', label: 'Title', required: true },
           { name: 'body', label: 'Body', type: 'textarea', required: true },
+          {
+            name: 'title_ar',
+            label: 'العنوان بالعربية',
+            dir: 'rtl',
+            help: 'Arabic readers get this title and body in their push, WhatsApp and inbox. Blank ⇒ they get the English text.',
+          },
+          { name: 'body_ar', label: 'النص بالعربية', dir: 'rtl', type: 'textarea' },
           { name: 'link_target', label: 'Link target (optional)', placeholder: '/shop' },
           {
             name: 'audience',
