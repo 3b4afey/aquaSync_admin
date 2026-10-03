@@ -1466,7 +1466,7 @@
         { name: 'replacement_interval_days', label: 'Lifespan (days)', type: 'number', required: true, value: m?.replacement_interval_days, help: 'Days the filter lasts (e.g. 1000) — drives Filter Health & Days Left. The clock resets when cartridges are changed.' },
         { name: 'bacteria_per_liter', label: 'Bacteria blocked / L', type: 'number', step: 'any', required: true, value: m?.bacteria_per_liter, help: 'Bacteria removed per liter — drives the Bacteria Blocked stat (rate × liters).' },
         { name: 'chemicals_mg_per_liter', label: 'Chemicals removed (mg / L)', type: 'number', step: 'any', required: true, value: m?.chemicals_mg_per_liter, help: 'Milligrams of chemicals removed per liter — drives Chemicals Filtered.' },
-        { name: 'kwh_per_liter', label: 'Energy saved (kWh / L)', type: 'number', step: 'any', required: true, value: m?.kwh_per_liter, help: 'kWh saved per liter — drives Energy Saved.' },
+        { name: 'tds_reduction_ppm', label: 'Dissolved solids removed (ppm)', type: 'number', step: 'any', value: m?.tds_reduction_ppm, help: 'TDS the model takes out of each liter, in ppm (= mg/L) — e.g. 500 ppm tap water down to 25 ppm is 475. Drives the Total Dissolved Solids stat. Leave blank for models with no TDS rating: they show Bottles Saved instead.' },
         { name: 'image_path', label: 'Image URL', value: m?.image_path },
         { name: 'qr_code', type: 'qr', value: m?.qr_code, qrName: m?.name },
         ...motorField,
@@ -1960,7 +1960,9 @@
     view().innerHTML = `
       <div class="notice">Customers raise these from the app when their filter health is low
         (≈15%). Move them <b>Open → In progress → Resolved</b> as you service the filter and
-        replace cartridges.</div>
+        replace cartridges. Resolving is also what earns the customer their loyalty point
+        (it lands 3 days later) — a request badged <b>Free (reward)</b> was paid for with a
+        full card, so charge nothing for that visit.</div>
       <div class="section-head"><h3>${data.length} request(s)</h3>
         <div class="toolbar"><select id="svcStatus">${filters
           .map(
@@ -1979,7 +1981,7 @@
           <td data-label="Filter" class="mono">${r.device_id ? short(r.device_id) : '—'}</td>
           <td data-label="Health">${r.health_percent != null ? r.health_percent + '%' : '—'}</td>
           <td data-label="Note">${esc(r.note || '—')}</td>
-          <td data-label="Status">${svcBadge(r.status)}</td>
+          <td data-label="Status">${svcBadge(r.status)}${r.is_free ? ' <span class="badge green">Free (reward)</span>' : ''}</td>
           <td class="actions">
             ${r.status === 'open' ? `<button class="btn ghost small" data-progress="${r.id}">Start</button>` : ''}
             ${r.status !== 'resolved' ? `<button class="btn primary small" data-resolve="${r.id}">Resolve</button>` : ''}
